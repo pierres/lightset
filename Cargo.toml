@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "Small Linux CLI for HID LampArray and ENE DRAM RGB lighting"
 license = "MIT"
+readme = "README.md"
 
 [dependencies]
 anyhow = "1"

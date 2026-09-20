@@ -1,8 +1,8 @@
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use hidapi::HidApi;
-use lampdimm::profile::DEFAULT_HARDWARE;
-use lampdimm::{
+use lightset::profile::DEFAULT_HARDWARE;
+use lightset::{
     ArrayAttributes, DeviceCandidate, LampAttributes, disable_autonomous_mode, discover_hidraw,
     format_bytes, hidraw_descriptor, is_lamp_array_descriptor, lamp_request, parse_rgb,
     range_channels, range_update,
@@ -139,7 +139,7 @@ fn main() -> Result<()> {
     }
 }
 fn dram_probe(bus: &std::path::Path, verbose: bool) -> Result<()> {
-    let devices = lampdimm::ene_dram::probe(bus, &DEFAULT_HARDWARE.ene_dram, verbose)?;
+    let devices = lightset::ene_dram::probe(bus, &DEFAULT_HARDWARE.ene_dram, verbose)?;
     println!("Bus: {}", bus.display());
     for device in devices {
         println!(
@@ -150,7 +150,7 @@ fn dram_probe(bus: &std::path::Path, verbose: bool) -> Result<()> {
     Ok(())
 }
 fn dram_dump(bus: &std::path::Path, address: u16) -> Result<()> {
-    let colors = lampdimm::ene_dram::dump(bus, &DEFAULT_HARDWARE.ene_dram, address)?;
+    let colors = lightset::ene_dram::dump(bus, &DEFAULT_HARDWARE.ene_dram, address)?;
     println!("Bus: {}\nAddress: 0x{address:02x}", bus.display());
     for (index, [red, green, blue]) in colors.into_iter().enumerate() {
         println!("LED {index}: {red:02x}{green:02x}{blue:02x}");
@@ -159,14 +159,14 @@ fn dram_dump(bus: &std::path::Path, address: u16) -> Result<()> {
 }
 fn dram_set(bus: &std::path::Path, address: u16, rgb: [u8; 3], dry_run: bool) -> Result<()> {
     let writes =
-        lampdimm::ene_dram::set_color(bus, &DEFAULT_HARDWARE.ene_dram, address, rgb, dry_run)?;
+        lightset::ene_dram::set_color(bus, &DEFAULT_HARDWARE.ene_dram, address, rgb, dry_run)?;
     println!("Bus: {}\nAddress: 0x{address:02x}", bus.display());
     for write in writes {
         match write {
-            lampdimm::ene_dram::RegisterWrite::Byte { register, value } => {
+            lightset::ene_dram::RegisterWrite::Byte { register, value } => {
                 println!("Write 0x{register:04x}: {value:02x}")
             }
-            lampdimm::ene_dram::RegisterWrite::Block { register, data } => {
+            lightset::ene_dram::RegisterWrite::Block { register, data } => {
                 println!("Write 0x{register:04x}: {}", format_bytes(&data))
             }
         }
@@ -178,7 +178,7 @@ fn dram_set(bus: &std::path::Path, address: u16, rgb: [u8; 3], dry_run: bool) ->
 }
 fn dram_set_all(bus: &std::path::Path, rgb: [u8; 3], dry_run: bool) -> Result<()> {
     let results =
-        lampdimm::ene_dram::set_all_colors(bus, &DEFAULT_HARDWARE.ene_dram, rgb, dry_run)?;
+        lightset::ene_dram::set_all_colors(bus, &DEFAULT_HARDWARE.ene_dram, rgb, dry_run)?;
     let mut failures = 0;
     for result in results {
         match result.result {
@@ -187,10 +187,10 @@ fn dram_set_all(bus: &std::path::Path, rgb: [u8; 3], dry_run: bool) -> Result<()
                 if dry_run {
                     for write in writes {
                         match write {
-                            lampdimm::ene_dram::RegisterWrite::Byte { register, value } => {
+                            lightset::ene_dram::RegisterWrite::Byte { register, value } => {
                                 println!("  Write 0x{register:04x}: {value:02x}")
                             }
-                            lampdimm::ene_dram::RegisterWrite::Block { register, data } => {
+                            lightset::ene_dram::RegisterWrite::Block { register, data } => {
                                 println!("  Write 0x{register:04x}: {}", format_bytes(&data))
                             }
                         }
@@ -357,7 +357,7 @@ fn set_all(cli: &Cli, rgb: [u8; 3], dry_run: bool) -> Result<()> {
     }
     let bus = match &cli.i2c_bus {
         Some(bus) => Ok(bus.clone()),
-        None => lampdimm::ene_dram::discover_bus(&DEFAULT_HARDWARE.ene_dram),
+        None => lightset::ene_dram::discover_bus(&DEFAULT_HARDWARE.ene_dram),
     };
     if let Err(error) = bus.and_then(|bus| dram_set_all(&bus, rgb, dry_run)) {
         println!("ENE DRAM: FAILED: {error:#}");

@@ -1,4 +1,4 @@
-# lampdimm
+# lightset
 
 Small Rust CLI for the ASUS HID LampArray interface and ENE DRAM RGB controllers. It sets one solid RGB color, then exits; no daemon, OpenRGB process, or proprietary ASUS HID protocol is used.
 
@@ -6,8 +6,8 @@ Small Rust CLI for the ASUS HID LampArray interface and ENE DRAM RGB controllers
 
 ```sh
 cargo build --release
-./target/release/lampdimm set ff0000
-./target/release/lampdimm off
+./target/release/lightset set ff0000
+./target/release/lightset off
 ```
 
 Those are the only normal-user commands. They update every configured backend, then exit. The DRAM bus is conservatively discovered by looking only at configured SMBus adapter names and configured ENE addresses.
@@ -48,11 +48,11 @@ The Direct write sequence is:
 2. Write eight 3-byte `R,B,G` blocks from `0x8100` through `0x8115`.
 3. Do not send a trailing apply or any save-to-flash command.
 
-Keep OpenRGB stopped while using `lampdimm`. The tool never scans arbitrary SMBus addresses, touches SPD/EEPROM ranges, implements effects, or writes persistent controller state.
+Keep OpenRGB stopped while using `lightset`. The tool never scans arbitrary SMBus addresses, touches SPD/EEPROM ranges, implements effects, or writes persistent controller state.
 
 ## Permissions
 
-For desktop-session HID access, install this narrow udev rule as `/etc/udev/rules.d/99-lampdimm.rules`:
+For desktop-session HID access, install this narrow udev rule as `/etc/udev/rules.d/99-lightset.rules`:
 
 ```udev
 SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="18f3", TAG+="uaccess"
@@ -66,7 +66,7 @@ On the ASUS `0b05:18f3` controller used during development, the LampArray report
 
 ## Boot integration
 
-After installing the release binary as `/usr/local/bin/lampdimm`, a systemd oneshot service can apply a startup color:
+After installing the release binary as `/usr/local/bin/lightset`, a systemd oneshot service can apply a startup color:
 
 ```ini
 [Unit]
@@ -75,7 +75,7 @@ After=systemd-udev-settle.service
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/bin/lampdimm set ff0000
+ExecStart=/usr/local/bin/lightset set ff0000
 
 [Install]
 WantedBy=multi-user.target

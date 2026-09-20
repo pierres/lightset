@@ -10,7 +10,7 @@ cargo build --release
 ./target/release/lightset off
 ```
 
-Those are the only normal-user commands. They update every configured backend, then exit. The DRAM bus is conservatively discovered by looking only at configured SMBus adapter names and configured ENE addresses.
+These are the only normal commands. They update every configured backend, then exit. The DRAM bus is conservatively discovered by looking only at configured SMBus adapter names and configured ENE addresses.
 
 ## Developer diagnostics
 
@@ -50,39 +50,10 @@ The Direct write sequence is:
 
 Keep OpenRGB stopped while using `lightset`. The tool never scans arbitrary SMBus addresses, touches SPD/EEPROM ranges, implements effects, or writes persistent controller state.
 
-## Permissions
+## Privilege model
 
-For desktop-session HID access, install this narrow udev rule as `/etc/udev/rules.d/99-lightset.rules`:
-
-```udev
-SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="18f3", TAG+="uaccess"
-```
-
-Reload it with `sudo udevadm control --reload-rules`, then reconnect the device or reboot. The program validates the HID report descriptor before opening it, so it rejects the other, proprietary ASUS interface on the same controller. SMBus access also needs the existing `i2c`-device permission granted by your distribution; do not make `/dev/i2c-*` world-writable.
+Run `lightset` as root. Do not grant users access to the HID or I²C devices.
 
 ## Verified device
 
 On the ASUS `0b05:18f3` controller used during development, the LampArray reports one programmable chassis/accent lamp with 255 RGB levels and on/off intensity. It controls the motherboard and attached/synchronized GPU lighting together. Four `AUDA0-E6K5-0101` ENE DRAM controllers at `0x70`–`0x73` each expose eight LEDs; ENE direct-color memory uses `R,B,G` byte order.
-
-## Boot integration
-
-After installing the release binary as `/usr/local/bin/lightset`, a systemd oneshot service can apply a startup color:
-
-```ini
-[Unit]
-Description=Set startup RGB color
-After=systemd-udev-settle.service
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/bin/lightset set ff0000
-
-[Install]
-WantedBy=multi-user.target
-```
-
-If the SMBus device is not ready at boot, pass its path explicitly with `--i2c-bus /dev/i2c-10` or add device-specific ordering for the local system.
-
-## License
-
-MIT. See [LICENSE](LICENSE).

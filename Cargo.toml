@@ -1,0 +1,10 @@
+[package]
+name = "asus-lamp"
+version = "0.1.0"
+edition = "2024"
+description = "Small Linux CLI for standard HID LampArray devices"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+hidapi = { version = "2.6", default-features = false, features = ["linux-native-basic-udev"] }

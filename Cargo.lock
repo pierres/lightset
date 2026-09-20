@@ -59,15 +59,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
-name = "asus-lamp"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "hidapi",
-]
-
-[[package]]
 name = "basic-udev"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -179,6 +170,16 @@ name = "is_terminal_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a6cb138bb79a146c1bd460005623e142ef0181e3d0219cb493e02f7d08a35695"
+
+[[package]]
+name = "lampdimm"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "hidapi",
+ "libc",
+]
 
 [[package]]
 name = "libc"

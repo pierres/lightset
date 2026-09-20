@@ -1,15 +1,15 @@
 use anyhow::{Context, Result, bail};
-use asus_lamp::{
+use clap::{Parser, Subcommand};
+use hidapi::HidApi;
+use lampdimm::{
     ArrayAttributes, DeviceCandidate, LampAttributes, disable_autonomous_mode, discover_hidraw,
     format_bytes, hidraw_descriptor, is_lamp_array_descriptor, lamp_request, parse_rgb,
     range_channels, range_update,
 };
-use clap::{Parser, Subcommand};
-use hidapi::HidApi;
 use std::{ffi::CString, path::PathBuf, thread, time::Duration};
 
 #[derive(Parser)]
-#[command(about = "Set a solid color on an ASUS standard HID LampArray")]
+#[command(about = "Set a solid color on ASUS LampArray and ENE DRAM lighting")]
 struct Cli {
     #[arg(long, value_name = "PATH")]
     device: Option<PathBuf>,
@@ -19,6 +19,8 @@ struct Cli {
     pid: u16,
     #[arg(short, long)]
     verbose: bool,
+    #[arg(long, value_name = "PATH", global = true)]
+    i2c_bus: Option<PathBuf>,
     #[command(subcommand)]
     command: Command,
 }
@@ -38,6 +40,61 @@ enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+    Lamp {
+        #[command(subcommand)]
+        command: LampCommand,
+    },
+    Dram {
+        #[command(subcommand)]
+        command: DramCommand,
+    },
+}
+#[derive(Subcommand)]
+enum LampCommand {
+    List,
+    Info {
+        #[arg(long)]
+        lamps: bool,
+    },
+    Set {
+        color: String,
+        #[arg(long)]
+        dry_run: bool,
+    },
+    Off {
+        #[arg(long)]
+        dry_run: bool,
+    },
+}
+#[derive(Subcommand)]
+enum DramCommand {
+    Probe {
+        #[arg(long, value_name = "PATH")]
+        bus: PathBuf,
+    },
+    Dump {
+        #[arg(long, value_name = "PATH")]
+        bus: PathBuf,
+        #[arg(long, value_parser = parse_hex_u16)]
+        address: u16,
+    },
+    Set {
+        color: String,
+        #[arg(long, value_name = "PATH")]
+        bus: PathBuf,
+        #[arg(long, value_parser = parse_hex_u16)]
+        address: Option<u16>,
+        #[arg(long)]
+        dry_run: bool,
+    },
+    Off {
+        #[arg(long, value_name = "PATH")]
+        bus: PathBuf,
+        #[arg(long, value_parser = parse_hex_u16)]
+        address: Option<u16>,
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -45,9 +102,107 @@ fn main() -> Result<()> {
     match &cli.command {
         Command::List => list(),
         Command::Info { lamps } => info(&cli, *lamps),
-        Command::Set { color, dry_run } => set(&cli, parse_rgb(color)?, *dry_run),
-        Command::Off { dry_run } => set(&cli, [0, 0, 0], *dry_run),
+        Command::Set { color, dry_run } => set_all(&cli, parse_rgb(color)?, *dry_run),
+        Command::Off { dry_run } => set_all(&cli, [0, 0, 0], *dry_run),
+        Command::Lamp { command } => match command {
+            LampCommand::List => list(),
+            LampCommand::Info { lamps } => info(&cli, *lamps),
+            LampCommand::Set { color, dry_run } => lamp_set(&cli, parse_rgb(color)?, *dry_run),
+            LampCommand::Off { dry_run } => lamp_set(&cli, [0, 0, 0], *dry_run),
+        },
+        Command::Dram { command } => match command {
+            DramCommand::Probe { bus } => dram_probe(bus, cli.verbose),
+            DramCommand::Dump { bus, address } => dram_dump(bus, *address),
+            DramCommand::Set {
+                color,
+                bus,
+                address,
+                dry_run,
+            } => match address {
+                Some(address) => dram_set(bus, *address, parse_rgb(color)?, *dry_run),
+                None => dram_set_all(bus, parse_rgb(color)?, *dry_run),
+            },
+            DramCommand::Off {
+                bus,
+                address,
+                dry_run,
+            } => match address {
+                Some(address) => dram_set(bus, *address, [0, 0, 0], *dry_run),
+                None => dram_set_all(bus, [0, 0, 0], *dry_run),
+            },
+        },
     }
+}
+fn dram_probe(bus: &std::path::Path, verbose: bool) -> Result<()> {
+    let devices = lampdimm::ene_dram::probe(bus, verbose)?;
+    println!("Bus: {}", bus.display());
+    for device in devices {
+        println!(
+            "0x{:02x}  {}  LEDs: {}  supported",
+            device.address, device.version, device.led_count
+        );
+    }
+    Ok(())
+}
+fn dram_dump(bus: &std::path::Path, address: u16) -> Result<()> {
+    let colors = lampdimm::ene_dram::dump(bus, address)?;
+    println!("Bus: {}\nAddress: 0x{address:02x}", bus.display());
+    for (index, [red, green, blue]) in colors.into_iter().enumerate() {
+        println!("LED {index}: {red:02x}{green:02x}{blue:02x}");
+    }
+    Ok(())
+}
+fn dram_set(bus: &std::path::Path, address: u16, rgb: [u8; 3], dry_run: bool) -> Result<()> {
+    let writes = lampdimm::ene_dram::set_color(bus, address, rgb, dry_run)?;
+    println!("Bus: {}\nAddress: 0x{address:02x}", bus.display());
+    for write in writes {
+        match write {
+            lampdimm::ene_dram::RegisterWrite::Byte { register, value } => {
+                println!("Write 0x{register:04x}: {value:02x}")
+            }
+            lampdimm::ene_dram::RegisterWrite::Block { register, data } => {
+                println!("Write 0x{register:04x}: {}", format_bytes(&data))
+            }
+        }
+    }
+    if dry_run {
+        println!("Dry run: no DRAM color writes sent");
+    }
+    Ok(())
+}
+fn dram_set_all(bus: &std::path::Path, rgb: [u8; 3], dry_run: bool) -> Result<()> {
+    let results = lampdimm::ene_dram::set_all_colors(bus, rgb, dry_run)?;
+    let mut failures = 0;
+    for result in results {
+        match result.result {
+            Ok(writes) => {
+                println!("ENE DRAM 0x{:02x}: OK", result.address);
+                if dry_run {
+                    for write in writes {
+                        match write {
+                            lampdimm::ene_dram::RegisterWrite::Byte { register, value } => {
+                                println!("  Write 0x{register:04x}: {value:02x}")
+                            }
+                            lampdimm::ene_dram::RegisterWrite::Block { register, data } => {
+                                println!("  Write 0x{register:04x}: {}", format_bytes(&data))
+                            }
+                        }
+                    }
+                }
+            }
+            Err(error) => {
+                failures += 1;
+                println!("ENE DRAM 0x{:02x}: FAILED: {error}", result.address);
+            }
+        }
+    }
+    if failures > 0 {
+        bail!("{failures} ENE DRAM controller(s) failed")
+    }
+    if dry_run {
+        println!("Dry run: no DRAM color writes sent");
+    }
+    Ok(())
 }
 fn list() -> Result<()> {
     for d in discover_hidraw()? {
@@ -147,7 +302,7 @@ fn info(cli: &Cli, lamps: bool) -> Result<()> {
     }
     Ok(())
 }
-fn set(cli: &Cli, rgb: [u8; 3], dry_run: bool) -> Result<()> {
+fn lamp_set(cli: &Cli, rgb: [u8; 3], dry_run: bool) -> Result<()> {
     let (device, candidate) = open(cli)?;
     let attrs = attributes(&device, cli.verbose)?;
     let lamps = read_lamps(&device, attrs.lamp_count, cli.verbose)?;
@@ -174,6 +329,33 @@ fn set(cli: &Cli, rgb: [u8; 3], dry_run: bool) -> Result<()> {
         .send_feature_report(&update)
         .context("SET feature report 5 (range update)")?;
     Ok(())
+}
+fn set_all(cli: &Cli, rgb: [u8; 3], dry_run: bool) -> Result<()> {
+    let mut failures = Vec::new();
+    match lamp_set(cli, rgb, dry_run) {
+        Ok(()) => println!("LampArray: OK"),
+        Err(error) => {
+            println!("LampArray: FAILED: {error:#}");
+            failures.push("LampArray");
+        }
+    }
+    let bus = match &cli.i2c_bus {
+        Some(bus) => Ok(bus.clone()),
+        None => lampdimm::ene_dram::discover_bus(),
+    };
+    if let Err(error) = bus.and_then(|bus| dram_set_all(&bus, rgb, dry_run)) {
+        println!("ENE DRAM: FAILED: {error:#}");
+        failures.push("ENE DRAM");
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        bail!(
+            "{} backend(s) failed: {}",
+            failures.len(),
+            failures.join(", ")
+        )
+    }
 }
 fn read_lamps(
     device: &hidapi::HidDevice,

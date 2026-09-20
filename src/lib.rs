@@ -4,6 +4,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+pub mod ene_dram;
+
 pub const ASUS_VID: u16 = 0x0b05;
 pub const ASUS_PID: u16 = 0x18f3;
 pub const ATTRIBUTES_REPORT: u8 = 1;

@@ -6,16 +6,15 @@ Small Rust CLI for the ASUS HID LampArray interface and ENE DRAM RGB controllers
 
 ```sh
 cargo build --release
-cargo run -- lamp list
-cargo run -- -v lamp info --lamps
-cargo run -- -v set ff0000 --dry-run
-cargo run -- set ff0000
-cargo run -- off
+./target/release/lampdimm set ff0000
+./target/release/lampdimm off
 ```
 
-Top-level `set` and `off` update both backends. The DRAM bus is conservatively discovered by looking only at AMD PIIX4 SMBus adapters and then probing only ENE addresses `0x70`–`0x73`. Override discovery with `--i2c-bus /dev/i2c-10`.
+Those are the only normal-user commands. They update every configured backend, then exit. The DRAM bus is conservatively discovered by looking only at configured SMBus adapter names and configured ENE addresses.
 
-For diagnostics and development:
+## Developer diagnostics
+
+Hidden backend-specific commands and overrides remain available for development and hardware bring-up:
 
 ```sh
 cargo run -- dram probe --bus /dev/i2c-10
@@ -26,6 +25,16 @@ cargo run -- dram off --bus /dev/i2c-10
 ```
 
 `lamp info --lamps`, `dram probe`, and `dram dump` only query metadata/direct-color memory. `set` validates the device ID and LED count before writing. `--dry-run` prints the exact HID reports and ENE register writes without sending state-changing updates.
+
+## Hardware profiles
+
+The verified hardware is defined in [src/profile.rs](src/profile.rs). To support another machine, add a profile there rather than changing protocol code. A profile specifies:
+
+- optional LampArray VID/PID constraints (or `None` for any descriptor-validated LampArray);
+- permitted SMBus adapter-name patterns and I²C addresses;
+- each accepted ENE version, LED count, direct-color register/layout, and Direct-mode write sequence.
+
+The program will not probe unlisted SMBus addresses or write to a controller whose identifier and LED count do not exactly match a profile.
 
 ## Backends and safety
 

@@ -3,6 +3,7 @@
 //! with an SMBus word write to command 0x00; the Linux SMBus ABI serializes a
 //! word least-significant byte first, so the register value is byte-swapped.
 //! The selected byte is then read through command 0x81.
+use crate::profile::{EneControllerProfile, EneDramProfile};
 use anyhow::{Context, Result, bail, ensure};
 use std::{
     fs::{self, OpenOptions},
@@ -10,17 +11,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub const SUPPORTED_VERSION: &str = "AUDA0-E6K5-0101";
 const DEVICE_NAME_REGISTER: u16 = 0x1000;
 const CONFIG_TABLE_REGISTER: u16 = 0x1c00;
-const DIRECT_COLORS_V2_REGISTER: u16 = 0x8100;
-const DIRECT_REGISTER: u16 = 0x8020;
-const APPLY_REGISTER: u16 = 0x80a0;
-const APPLY_VALUE: u8 = 0x01;
-const MAX_BLOCK: usize = 3;
 const CONFIG_LED_COUNT: usize = 0x02;
-const EXPECTED_LED_COUNT: u8 = 8;
-const ENE_ADDRESSES: std::ops::RangeInclusive<u16> = 0x70..=0x73;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EneDramDevice {
@@ -28,6 +21,7 @@ pub struct EneDramDevice {
     pub address: u16,
     pub version: String,
     pub led_count: u8,
+    pub controller: EneControllerProfile,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,7 +36,7 @@ pub struct DeviceWriteResult {
     pub result: Result<Vec<RegisterWrite>, String>,
 }
 
-pub fn probe(bus: &Path, verbose: bool) -> Result<Vec<EneDramDevice>> {
+pub fn probe(bus: &Path, profile: &EneDramProfile, verbose: bool) -> Result<Vec<EneDramDevice>> {
     let file = OpenOptions::new()
         .read(true)
         .write(true)
@@ -57,8 +51,8 @@ pub fn probe(bus: &Path, verbose: bool) -> Result<Vec<EneDramDevice>> {
         fd: file.as_raw_fd(),
     };
     let mut devices = Vec::new();
-    for address in ENE_ADDRESSES {
-        match probe_address(&transport, bus, address) {
+    for &address in profile.addresses {
+        match probe_address(&transport, bus, address, profile) {
             Ok(Some(device)) => devices.push(device),
             Ok(None) if verbose => {
                 eprintln!("0x{address:02x}: not a supported ENE DRAM controller")
@@ -73,23 +67,27 @@ pub fn probe(bus: &Path, verbose: bool) -> Result<Vec<EneDramDevice>> {
 
 /// Discover conservatively: only AMD PIIX4-style SMBus adapters are considered,
 /// and only the four ENE addresses used by this platform are probed.
-pub fn discover_bus() -> Result<PathBuf> {
+pub fn discover_bus(profile: &EneDramProfile) -> Result<PathBuf> {
     let class = Path::new("/sys/class/i2c-dev");
     for entry in fs::read_dir(class).context("read /sys/class/i2c-dev")? {
         let entry = entry?;
         let name = fs::read_to_string(entry.path().join("name")).unwrap_or_default();
-        if !name.contains("SMBus PIIX4 adapter") {
+        if !profile
+            .adapter_name_patterns
+            .iter()
+            .any(|pattern| name.contains(pattern))
+        {
             continue;
         }
         let bus = Path::new("/dev").join(entry.file_name());
-        if !probe(&bus, false)?.is_empty() {
+        if !probe(&bus, profile, false)?.is_empty() {
             return Ok(bus);
         }
     }
-    bail!("no supported ENE DRAM controllers found on an AMD PIIX4 SMBus adapter")
+    bail!("no supported ENE DRAM controllers found on a configured SMBus adapter")
 }
 
-pub fn dump(bus: &Path, address: u16) -> Result<Vec<[u8; 3]>> {
+pub fn dump(bus: &Path, profile: &EneDramProfile, address: u16) -> Result<Vec<[u8; 3]>> {
     let file = OpenOptions::new()
         .read(true)
         .write(true)
@@ -98,19 +96,20 @@ pub fn dump(bus: &Path, address: u16) -> Result<Vec<[u8; 3]>> {
     let transport = SmbusTransport {
         fd: file.as_raw_fd(),
     };
-    let device = probe_address(&transport, bus, address)?
+    let device = probe_address(&transport, bus, address, profile)?
         .with_context(|| format!("0x{address:02x} is not a supported ENE DRAM controller"))?;
     let bytes = read_bytes(
         &transport,
         address,
-        DIRECT_COLORS_V2_REGISTER,
+        device.controller.direct_color_register,
         usize::from(device.led_count) * 3,
     )?;
-    decode_direct_colors(&bytes)
+    decode_direct_colors(&bytes, device.controller)
 }
 
 pub fn set_color(
     bus: &Path,
+    profile: &EneDramProfile,
     address: u16,
     rgb: [u8; 3],
     dry_run: bool,
@@ -123,9 +122,9 @@ pub fn set_color(
     let transport = SmbusTransport {
         fd: file.as_raw_fd(),
     };
-    let device = probe_address(&transport, bus, address)?
+    let device = probe_address(&transport, bus, address, profile)?
         .with_context(|| format!("0x{address:02x} is not a supported ENE DRAM controller"))?;
-    let writes = direct_color_writes(device.led_count, rgb)?;
+    let writes = direct_color_writes(device.controller, rgb);
     if !dry_run {
         for write in &writes {
             match write {
@@ -142,8 +141,13 @@ pub fn set_color(
 }
 
 /// Attempt every validated controller; one DIMM failing does not stop the rest.
-pub fn set_all_colors(bus: &Path, rgb: [u8; 3], dry_run: bool) -> Result<Vec<DeviceWriteResult>> {
-    let devices = probe(bus, false)?;
+pub fn set_all_colors(
+    bus: &Path,
+    profile: &EneDramProfile,
+    rgb: [u8; 3],
+    dry_run: bool,
+) -> Result<Vec<DeviceWriteResult>> {
+    let devices = probe(bus, profile, false)?;
     ensure!(
         !devices.is_empty(),
         "no supported ENE DRAM controllers found on {}",
@@ -153,7 +157,7 @@ pub fn set_all_colors(bus: &Path, rgb: [u8; 3], dry_run: bool) -> Result<Vec<Dev
         .into_iter()
         .map(|device| DeviceWriteResult {
             address: device.address,
-            result: set_color(bus, device.address, rgb, dry_run)
+            result: set_color(bus, profile, device.address, rgb, dry_run)
                 .map_err(|error| format!("{error:#}")),
         })
         .collect())
@@ -162,57 +166,59 @@ pub fn set_all_colors(bus: &Path, rgb: [u8; 3], dry_run: bool) -> Result<Vec<Dev
 /// OpenRGB's GUI Direct path calls SetDirect(true), which writes Direct then
 /// Apply, followed by SetAllColorsDirect. The latter writes 3-byte blocks and
 /// deliberately does not issue a further Apply write.
-pub fn direct_color_writes(led_count: u8, rgb: [u8; 3]) -> Result<Vec<RegisterWrite>> {
-    ensure!(
-        led_count == EXPECTED_LED_COUNT,
-        "unsupported ENE LED count {led_count}; expected {EXPECTED_LED_COUNT}"
-    );
-    let mut direct_bytes = Vec::with_capacity(usize::from(led_count) * 3);
-    for _ in 0..led_count {
-        direct_bytes.extend([rgb[0], rgb[2], rgb[1]]);
+pub fn direct_color_writes(controller: EneControllerProfile, rgb: [u8; 3]) -> Vec<RegisterWrite> {
+    let mut direct_bytes = Vec::with_capacity(usize::from(controller.led_count) * 3);
+    for _ in 0..controller.led_count {
+        let mut bytes = [0; 3];
+        bytes[controller.direct_color_order[0]] = rgb[0];
+        bytes[controller.direct_color_order[1]] = rgb[1];
+        bytes[controller.direct_color_order[2]] = rgb[2];
+        direct_bytes.extend(bytes);
     }
     let mut writes = vec![
         RegisterWrite::Byte {
-            register: DIRECT_REGISTER,
-            value: 1,
+            register: controller.direct_register,
+            value: controller.direct_value,
         },
         RegisterWrite::Byte {
-            register: APPLY_REGISTER,
-            value: APPLY_VALUE,
+            register: controller.apply_register,
+            value: controller.apply_value,
         },
     ];
-    for (index, block) in direct_bytes.chunks(MAX_BLOCK).enumerate() {
+    for (index, block) in direct_bytes.chunks(controller.block_size).enumerate() {
         writes.push(RegisterWrite::Block {
-            register: DIRECT_COLORS_V2_REGISTER + (index * MAX_BLOCK) as u16,
+            register: controller.direct_color_register + (index * controller.block_size) as u16,
             data: block.to_vec(),
         });
     }
-    Ok(writes)
+    writes
 }
 
 fn probe_address(
     transport: &SmbusTransport,
     bus: &Path,
     address: u16,
+    profile: &EneDramProfile,
 ) -> Result<Option<EneDramDevice>> {
     let name = read_bytes(transport, address, DEVICE_NAME_REGISTER, 16)?;
     let version = String::from_utf8_lossy(&name)
         .trim_end_matches('\0')
         .to_owned();
-    if version != SUPPORTED_VERSION {
-        return Ok(None);
-    }
     let config = read_bytes(transport, address, CONFIG_TABLE_REGISTER, 64)?;
     let led_count = config[CONFIG_LED_COUNT];
-    ensure!(
-        led_count == EXPECTED_LED_COUNT,
-        "unsupported ENE LED count {led_count}; expected {EXPECTED_LED_COUNT}"
-    );
+    let Some(controller) = profile
+        .controllers
+        .iter()
+        .find(|controller| controller.version == version && controller.led_count == led_count)
+    else {
+        return Ok(None);
+    };
     Ok(Some(EneDramDevice {
         bus: bus.to_owned(),
         address,
         version,
         led_count,
+        controller: *controller,
     }))
 }
 
@@ -228,7 +234,10 @@ fn read_bytes(
 }
 
 /// ENE direct colors are stored in R, B, G order, not ordinary RGB order.
-pub fn decode_direct_colors(bytes: &[u8]) -> Result<Vec<[u8; 3]>> {
+pub fn decode_direct_colors(
+    bytes: &[u8],
+    controller: EneControllerProfile,
+) -> Result<Vec<[u8; 3]>> {
     ensure!(
         bytes.len().is_multiple_of(3),
         "ENE direct-color data must be a multiple of three bytes"
@@ -236,7 +245,13 @@ pub fn decode_direct_colors(bytes: &[u8]) -> Result<Vec<[u8; 3]>> {
     let (chunks, _) = bytes.as_chunks::<3>();
     Ok(chunks
         .iter()
-        .map(|chunk| [chunk[0], chunk[2], chunk[1]])
+        .map(|chunk| {
+            [
+                chunk[controller.direct_color_order[0]],
+                chunk[controller.direct_color_order[1]],
+                chunk[controller.direct_color_order[2]],
+            ]
+        })
         .collect())
 }
 
@@ -257,8 +272,8 @@ impl SmbusTransport {
     }
     fn write_register_block(&self, address: u16, register: u16, data: &[u8]) -> Result<()> {
         ensure!(
-            !data.is_empty() && data.len() <= MAX_BLOCK,
-            "ENE block must contain 1..={MAX_BLOCK} bytes"
+            !data.is_empty() && data.len() <= 32,
+            "ENE block must contain 1..=32 bytes"
         );
         self.set_address(address)?;
         self.write_word(0x00, register.swap_bytes())?;
@@ -374,24 +389,29 @@ const I2C_SMBUS_BLOCK_DATA: u32 = 5;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::profile::DEFAULT_HARDWARE;
     #[test]
     fn ene_register_word_is_byte_swapped_for_linux_smbus() {
         assert_eq!(0x8100_u16.swap_bytes(), 0x0081);
     }
     #[test]
     fn known_controller_id_is_exact() {
-        assert_eq!(SUPPORTED_VERSION.as_bytes().len(), 15);
+        assert_eq!(DEFAULT_HARDWARE.ene_dram.controllers[0].version.len(), 15);
     }
     #[test]
     fn direct_color_bytes_decode_from_rbg() {
         assert_eq!(
-            decode_direct_colors(&[0xff, 0x00, 0x00, 0x00, 0xff, 0x00]).unwrap(),
+            decode_direct_colors(
+                &[0xff, 0x00, 0x00, 0x00, 0xff, 0x00],
+                DEFAULT_HARDWARE.ene_dram.controllers[0],
+            )
+            .unwrap(),
             vec![[0xff, 0x00, 0x00], [0x00, 0x00, 0xff]]
         );
     }
     #[test]
     fn direct_writes_match_openrgb_gui_sequence() {
-        let writes = direct_color_writes(8, [0xff, 0, 0]).unwrap();
+        let writes = direct_color_writes(DEFAULT_HARDWARE.ene_dram.controllers[0], [0xff, 0, 0]);
         assert_eq!(writes.len(), 10);
         assert_eq!(
             writes[0],

@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use hidapi::HidApi;
+use lampdimm::profile::DEFAULT_HARDWARE;
 use lampdimm::{
     ArrayAttributes, DeviceCandidate, LampAttributes, disable_autonomous_mode, discover_hidraw,
     format_bytes, hidraw_descriptor, is_lamp_array_descriptor, lamp_request, parse_rgb,
@@ -11,22 +12,24 @@ use std::{ffi::CString, path::PathBuf, thread, time::Duration};
 #[derive(Parser)]
 #[command(about = "Set a solid color on ASUS LampArray and ENE DRAM lighting")]
 struct Cli {
-    #[arg(long, value_name = "PATH")]
+    #[arg(long, value_name = "PATH", hide = true)]
     device: Option<PathBuf>,
-    #[arg(long, default_value = "0b05", value_parser = parse_hex_u16)]
-    vid: u16,
-    #[arg(long, default_value = "18f3", value_parser = parse_hex_u16)]
-    pid: u16,
-    #[arg(short, long)]
+    #[arg(long, value_parser = parse_hex_u16, hide = true)]
+    vid: Option<u16>,
+    #[arg(long, value_parser = parse_hex_u16, hide = true)]
+    pid: Option<u16>,
+    #[arg(short, long, hide = true)]
     verbose: bool,
-    #[arg(long, value_name = "PATH", global = true)]
+    #[arg(long, value_name = "PATH", global = true, hide = true)]
     i2c_bus: Option<PathBuf>,
     #[command(subcommand)]
     command: Command,
 }
 #[derive(Subcommand)]
 enum Command {
+    #[command(hide = true)]
     List,
+    #[command(hide = true)]
     Info {
         #[arg(long)]
         lamps: bool,
@@ -40,10 +43,12 @@ enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+    #[command(hide = true)]
     Lamp {
         #[command(subcommand)]
         command: LampCommand,
     },
+    #[command(hide = true)]
     Dram {
         #[command(subcommand)]
         command: DramCommand,
@@ -134,7 +139,7 @@ fn main() -> Result<()> {
     }
 }
 fn dram_probe(bus: &std::path::Path, verbose: bool) -> Result<()> {
-    let devices = lampdimm::ene_dram::probe(bus, verbose)?;
+    let devices = lampdimm::ene_dram::probe(bus, &DEFAULT_HARDWARE.ene_dram, verbose)?;
     println!("Bus: {}", bus.display());
     for device in devices {
         println!(
@@ -145,7 +150,7 @@ fn dram_probe(bus: &std::path::Path, verbose: bool) -> Result<()> {
     Ok(())
 }
 fn dram_dump(bus: &std::path::Path, address: u16) -> Result<()> {
-    let colors = lampdimm::ene_dram::dump(bus, address)?;
+    let colors = lampdimm::ene_dram::dump(bus, &DEFAULT_HARDWARE.ene_dram, address)?;
     println!("Bus: {}\nAddress: 0x{address:02x}", bus.display());
     for (index, [red, green, blue]) in colors.into_iter().enumerate() {
         println!("LED {index}: {red:02x}{green:02x}{blue:02x}");
@@ -153,7 +158,8 @@ fn dram_dump(bus: &std::path::Path, address: u16) -> Result<()> {
     Ok(())
 }
 fn dram_set(bus: &std::path::Path, address: u16, rgb: [u8; 3], dry_run: bool) -> Result<()> {
-    let writes = lampdimm::ene_dram::set_color(bus, address, rgb, dry_run)?;
+    let writes =
+        lampdimm::ene_dram::set_color(bus, &DEFAULT_HARDWARE.ene_dram, address, rgb, dry_run)?;
     println!("Bus: {}\nAddress: 0x{address:02x}", bus.display());
     for write in writes {
         match write {
@@ -171,7 +177,8 @@ fn dram_set(bus: &std::path::Path, address: u16, rgb: [u8; 3], dry_run: bool) ->
     Ok(())
 }
 fn dram_set_all(bus: &std::path::Path, rgb: [u8; 3], dry_run: bool) -> Result<()> {
-    let results = lampdimm::ene_dram::set_all_colors(bus, rgb, dry_run)?;
+    let results =
+        lampdimm::ene_dram::set_all_colors(bus, &DEFAULT_HARDWARE.ene_dram, rgb, dry_run)?;
     let mut failures = 0;
     for result in results {
         match result.result {
@@ -217,6 +224,8 @@ fn list() -> Result<()> {
     Ok(())
 }
 fn selected(cli: &Cli) -> Result<DeviceCandidate> {
+    let vid = cli.vid.or(DEFAULT_HARDWARE.lamp_array.vid);
+    let pid = cli.pid.or(DEFAULT_HARDWARE.lamp_array.pid);
     if let Some(path) = &cli.device {
         let descriptor = hidraw_descriptor(path)?;
         if !is_lamp_array_descriptor(&descriptor) {
@@ -227,18 +236,25 @@ fn selected(cli: &Cli) -> Result<DeviceCandidate> {
         };
         return Ok(DeviceCandidate {
             path: path.clone(),
-            vid: cli.vid,
-            pid: cli.pid,
+            vid: vid.unwrap_or_default(),
+            pid: pid.unwrap_or_default(),
             lamp_array: true,
         });
     }
     discover_hidraw()?
         .into_iter()
-        .find(|d| d.vid == cli.vid && d.pid == cli.pid && d.lamp_array)
+        .find(|d| {
+            d.lamp_array
+                && vid.is_none_or(|wanted| d.vid == wanted)
+                && pid.is_none_or(|wanted| d.pid == wanted)
+        })
         .with_context(|| {
             format!(
-                "no LampArray hidraw interface found for {:04x}:{:04x}",
-                cli.vid, cli.pid
+                "no matching LampArray hidraw interface found{}{}",
+                vid.map(|value| format!(" for VID {value:04x}"))
+                    .unwrap_or_default(),
+                pid.map(|value| format!(" PID {value:04x}"))
+                    .unwrap_or_default(),
             )
         })
 }
@@ -341,7 +357,7 @@ fn set_all(cli: &Cli, rgb: [u8; 3], dry_run: bool) -> Result<()> {
     }
     let bus = match &cli.i2c_bus {
         Some(bus) => Ok(bus.clone()),
-        None => lampdimm::ene_dram::discover_bus(),
+        None => lampdimm::ene_dram::discover_bus(&DEFAULT_HARDWARE.ene_dram),
     };
     if let Err(error) = bus.and_then(|bus| dram_set_all(&bus, rgb, dry_run)) {
         println!("ENE DRAM: FAILED: {error:#}");

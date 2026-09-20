@@ -2,7 +2,7 @@
 name = "lampdimm"
 version = "0.1.0"
 edition = "2024"
-description = "Small Linux CLI for standard HID LampArray devices"
+description = "Small Linux CLI for HID LampArray and ENE DRAM RGB lighting"
 
 [dependencies]
 anyhow = "1"

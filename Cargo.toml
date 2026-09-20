@@ -3,9 +3,15 @@ name = "lightset"
 version = "0.1.0"
 edition = "2024"
 description = "Small Linux CLI for HID LampArray and ENE DRAM RGB lighting"
+license = "MIT"
 
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 hidapi = { version = "2.6", default-features = false, features = ["linux-native-basic-udev"] }
 libc = "0.2"
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"

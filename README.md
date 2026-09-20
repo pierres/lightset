@@ -82,3 +82,7 @@ WantedBy=multi-user.target
 ```
 
 If the SMBus device is not ready at boot, pass its path explicitly with `--i2c-bus /dev/i2c-10` or add device-specific ordering for the local system.
+
+## License
+
+MIT. See [LICENSE](LICENSE).

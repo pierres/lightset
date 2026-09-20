@@ -10,21 +10,7 @@ cargo build --release
 ./target/release/lightset off
 ```
 
-These are the only normal commands. They update every configured backend, then exit. The DRAM bus is conservatively discovered by looking only at configured SMBus adapter names and configured ENE addresses.
-
-## Developer diagnostics
-
-Hidden backend-specific commands and overrides remain available for development and hardware bring-up:
-
-```sh
-cargo run -- dram probe --bus /dev/i2c-10
-cargo run -- dram dump --bus /dev/i2c-10 --address 0x70
-cargo run -- dram set ff0000 --bus /dev/i2c-10 --address 0x70 --dry-run
-cargo run -- dram set ff0000 --bus /dev/i2c-10
-cargo run -- dram off --bus /dev/i2c-10
-```
-
-`lamp info --lamps`, `dram probe`, and `dram dump` only query metadata/direct-color memory. `set` validates the device ID and LED count before writing. `--dry-run` prints the exact HID reports and ENE register writes without sending state-changing updates.
+These commands update every configured backend, then exit. The DRAM bus is conservatively discovered by looking only at configured SMBus adapter names and configured ENE addresses.
 
 ## Hardware profiles
 

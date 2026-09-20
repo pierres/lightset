@@ -32,14 +32,6 @@ pub fn is_lamp_array_descriptor(descriptor: &[u8]) -> bool {
         .any(|bytes| bytes == [0x05, 0x59, 0x09, 0x01])
 }
 
-pub fn hidraw_descriptor(path: &Path) -> Result<Vec<u8>> {
-    let name = path.file_name().context("hidraw path has no file name")?;
-    let descriptor = Path::new("/sys/class/hidraw")
-        .join(name)
-        .join("device/report_descriptor");
-    fs::read(&descriptor).with_context(|| format!("read {}", descriptor.display()))
-}
-
 pub fn discover_hidraw() -> Result<Vec<DeviceCandidate>> {
     let mut devices = Vec::new();
     for entry in fs::read_dir("/sys/class/hidraw").context("read /sys/class/hidraw")? {
@@ -229,14 +221,6 @@ fn le_u32(bytes: &[u8], offset: usize) -> u32 {
             .try_into()
             .expect("validated report length"),
     )
-}
-
-pub fn format_bytes(bytes: &[u8]) -> String {
-    bytes
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 pub fn parse_rgb(value: &str) -> Result<[u8; 3]> {

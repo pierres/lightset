@@ -36,6 +36,13 @@ pub struct DeviceWriteResult {
     pub result: Result<(), String>,
 }
 
+/// ENE devices validated on a single SMBus and ready for a color write.
+#[derive(Debug)]
+pub struct PreparedDram {
+    bus: PathBuf,
+    devices: Vec<EneDramDevice>,
+}
+
 /// A non-mutating report of what each configured ENE address returned.
 #[derive(Debug)]
 pub struct BusDiagnostic {
@@ -79,9 +86,10 @@ fn probe(bus: &Path, profile: &EneDramProfile) -> Result<Vec<EneDramDevice>> {
     Ok(devices)
 }
 
-/// Discover conservatively: only AMD PIIX4-style SMBus adapters are considered,
-/// and only the four ENE addresses used by this platform are probed.
-pub fn discover_bus(profile: &EneDramProfile) -> Result<PathBuf> {
+/// Prepare all validated ENE DRAM devices before making any visible change.
+/// Discovery is conservative: only configured PIIX4 adapters and addresses are
+/// probed.
+pub fn prepare(profile: &EneDramProfile) -> Result<PreparedDram> {
     let class = Path::new("/sys/class/i2c-dev");
     for entry in fs::read_dir(class).context("read /sys/class/i2c-dev")? {
         let entry = entry?;
@@ -95,11 +103,17 @@ pub fn discover_bus(profile: &EneDramProfile) -> Result<PathBuf> {
         }
         let bus = Path::new("/dev").join(entry.file_name());
         remap_dram_devices(&bus, profile)?;
-        if !probe(&bus, profile)?.is_empty() {
-            return Ok(bus);
+        let devices = probe(&bus, profile)?;
+        if !devices.is_empty() {
+            return Ok(PreparedDram { bus, devices });
         }
     }
     bail!("no supported ENE DRAM controllers found on a configured SMBus adapter")
+}
+
+/// Discover a supported ENE DRAM bus without retaining the validated devices.
+pub fn discover_bus(profile: &EneDramProfile) -> Result<PathBuf> {
+    Ok(prepare(profile)?.bus)
 }
 
 /// ENE DRAM controllers can boot behind a mapper at 0x77 instead of having
@@ -228,32 +242,47 @@ fn diagnose_address(
     }
 }
 
-fn set_color(bus: &Path, profile: &EneDramProfile, address: u16, rgb: [u8; 3]) -> Result<()> {
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(bus)
-        .with_context(|| format!("open {}", bus.display()))?;
-    let transport = SmbusTransport {
-        fd: file.as_raw_fd(),
-    };
-    let device = probe_address(&transport, address, profile)?
-        .with_context(|| format!("0x{address:02x} is not a supported ENE DRAM controller"))?;
+fn set_color(transport: &SmbusTransport, device: &EneDramDevice, rgb: [u8; 3]) -> Result<()> {
     let writes = direct_color_writes(device.controller, rgb);
     for write in &writes {
         match write {
             RegisterWrite::Byte { register, value } => {
-                transport.write_register(address, *register, *value)?
+                transport.write_register(device.address, *register, *value)?
             }
             RegisterWrite::Block { register, data } => {
-                transport.write_register_block(address, *register, data)?
+                transport.write_register_block(device.address, *register, data)?
             }
         }
     }
     Ok(())
 }
 
-/// Attempt every validated controller; one DIMM failing does not stop the rest.
+/// Attempt every prepared controller; one DIMM failing does not stop the rest.
+pub fn set_prepared_colors(
+    prepared: &PreparedDram,
+    rgb: [u8; 3],
+) -> Result<Vec<DeviceWriteResult>> {
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&prepared.bus)
+        .with_context(|| format!("open {}", prepared.bus.display()))?;
+    let transport = SmbusTransport {
+        fd: file.as_raw_fd(),
+    };
+    Ok(prepared
+        .devices
+        .iter()
+        .map(|device| DeviceWriteResult {
+            address: device.address,
+            result: set_color(&transport, device, rgb).map_err(|error| format!("{error:#}")),
+        })
+        .collect())
+}
+
+/// Discover devices on one bus and write them. Prefer [`prepare`] followed by
+/// [`set_prepared_colors`] when the visible write should happen without a
+/// second discovery pass.
 pub fn set_all_colors(
     bus: &Path,
     profile: &EneDramProfile,
@@ -265,14 +294,13 @@ pub fn set_all_colors(
         "no supported ENE DRAM controllers found on {}",
         bus.display()
     );
-    Ok(devices
-        .into_iter()
-        .map(|device| DeviceWriteResult {
-            address: device.address,
-            result: set_color(bus, profile, device.address, rgb)
-                .map_err(|error| format!("{error:#}")),
-        })
-        .collect())
+    set_prepared_colors(
+        &PreparedDram {
+            bus: bus.to_owned(),
+            devices,
+        },
+        rgb,
+    )
 }
 
 /// OpenRGB's GUI Direct path calls SetDirect(true), which writes Direct then

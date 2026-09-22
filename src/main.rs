@@ -52,8 +52,8 @@ fn probe() -> Result<()> {
     }
     Ok(())
 }
-fn dram_set_all(bus: &std::path::Path, rgb: [u8; 3]) -> Result<()> {
-    let results = lightset::ene_dram::set_all_colors(bus, &DEFAULT_HARDWARE.ene_dram, rgb)?;
+fn dram_set_all(prepared: &lightset::ene_dram::PreparedDram, rgb: [u8; 3]) -> Result<()> {
+    let results = lightset::ene_dram::set_prepared_colors(prepared, rgb)?;
     let mut failures = 0;
     for result in results {
         match result.result {
@@ -129,6 +129,7 @@ fn lamp_set(rgb: [u8; 3]) -> Result<()> {
 }
 fn set_all(rgb: [u8; 3]) -> Result<()> {
     let mut failures = Vec::new();
+    let dram = lightset::ene_dram::prepare(&DEFAULT_HARDWARE.ene_dram);
     match lamp_set(rgb) {
         Ok(()) => println!("LampArray: OK"),
         Err(error) => {
@@ -136,9 +137,7 @@ fn set_all(rgb: [u8; 3]) -> Result<()> {
             failures.push("LampArray");
         }
     }
-    if let Err(error) = lightset::ene_dram::discover_bus(&DEFAULT_HARDWARE.ene_dram)
-        .and_then(|bus| dram_set_all(&bus, rgb))
-    {
+    if let Err(error) = dram.and_then(|prepared| dram_set_all(&prepared, rgb)) {
         println!("ENE DRAM: FAILED: {error:#}");
         failures.push("ENE DRAM");
     }

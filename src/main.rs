@@ -20,6 +20,7 @@ enum Command {
         color: String,
     },
     Off,
+    #[cfg(debug_assertions)]
     /// Report every configured ENE DRAM address without changing lighting.
     Probe,
 }
@@ -29,9 +30,11 @@ fn main() -> Result<()> {
     match &cli.command {
         Command::Set { color } => set_all(parse_rgb(color)?),
         Command::Off => set_all([0, 0, 0]),
+        #[cfg(debug_assertions)]
         Command::Probe => probe(),
     }
 }
+#[cfg(debug_assertions)]
 fn probe() -> Result<()> {
     for bus in lightset::ene_dram::diagnose(&DEFAULT_HARDWARE.ene_dram)? {
         println!("{} ({})", bus.bus.display(), bus.adapter_name);

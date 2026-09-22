@@ -44,6 +44,7 @@ pub struct PreparedDram {
 }
 
 /// A non-mutating report of what each configured ENE address returned.
+#[cfg(debug_assertions)]
 #[derive(Debug)]
 pub struct BusDiagnostic {
     pub bus: PathBuf,
@@ -52,6 +53,7 @@ pub struct BusDiagnostic {
     pub addresses: Vec<AddressDiagnostic>,
 }
 
+#[cfg(debug_assertions)]
 #[derive(Debug)]
 pub struct AddressDiagnostic {
     pub address: u16,
@@ -153,6 +155,7 @@ fn mapper_assignments(
 
 /// Read, but never write, all configured controller identity fields. This is
 /// intended for diagnosing a controller that no longer matches its profile.
+#[cfg(debug_assertions)]
 pub fn diagnose(profile: &EneDramProfile) -> Result<Vec<BusDiagnostic>> {
     let class = Path::new("/sys/class/i2c-dev");
     let mut buses = Vec::new();
@@ -197,6 +200,7 @@ pub fn diagnose(profile: &EneDramProfile) -> Result<Vec<BusDiagnostic>> {
     Ok(buses)
 }
 
+#[cfg(debug_assertions)]
 fn diagnose_address(
     transport: &SmbusTransport,
     address: u16,

@@ -16,8 +16,12 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Command {
-    Set { color: String },
+    Set {
+        color: String,
+    },
     Off,
+    /// Report every configured ENE DRAM address without changing lighting.
+    Probe,
 }
 
 fn main() -> Result<()> {
@@ -25,7 +29,28 @@ fn main() -> Result<()> {
     match &cli.command {
         Command::Set { color } => set_all(parse_rgb(color)?),
         Command::Off => set_all([0, 0, 0]),
+        Command::Probe => probe(),
     }
+}
+fn probe() -> Result<()> {
+    for bus in lightset::ene_dram::diagnose(&DEFAULT_HARDWARE.ene_dram)? {
+        println!("{} ({})", bus.bus.display(), bus.adapter_name);
+        if let Some(error) = bus.open_error {
+            println!("  open: FAILED: {error}");
+            continue;
+        }
+        for address in bus.addresses {
+            match (address.version, address.led_count, address.error) {
+                (_, _, Some(error)) => println!("  0x{:02x}: FAILED: {error}", address.address),
+                (Some(version), Some(led_count), None) => println!(
+                    "  0x{:02x}: version={version:?}, leds={led_count}, supported={}",
+                    address.address, address.supported
+                ),
+                _ => unreachable!("a diagnostic has a result or an error"),
+            }
+        }
+    }
+    Ok(())
 }
 fn dram_set_all(bus: &std::path::Path, rgb: [u8; 3]) -> Result<()> {
     let results = lightset::ene_dram::set_all_colors(bus, &DEFAULT_HARDWARE.ene_dram, rgb)?;

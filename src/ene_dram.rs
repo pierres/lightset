@@ -14,6 +14,9 @@ use std::{
 const DEVICE_NAME_REGISTER: u16 = 0x1000;
 const CONFIG_TABLE_REGISTER: u16 = 0x1c00;
 const CONFIG_LED_COUNT: usize = 0x02;
+const DRAM_MAPPER_ADDRESS: u16 = 0x77;
+const DRAM_MAPPER_SLOT_REGISTER: u16 = 0x80f8;
+const DRAM_MAPPER_ADDRESS_REGISTER: u16 = 0x80f9;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct EneDramDevice {
@@ -31,6 +34,24 @@ enum RegisterWrite {
 pub struct DeviceWriteResult {
     pub address: u16,
     pub result: Result<(), String>,
+}
+
+/// A non-mutating report of what each configured ENE address returned.
+#[derive(Debug)]
+pub struct BusDiagnostic {
+    pub bus: PathBuf,
+    pub adapter_name: String,
+    pub open_error: Option<String>,
+    pub addresses: Vec<AddressDiagnostic>,
+}
+
+#[derive(Debug)]
+pub struct AddressDiagnostic {
+    pub address: u16,
+    pub version: Option<String>,
+    pub led_count: Option<u8>,
+    pub error: Option<String>,
+    pub supported: bool,
 }
 
 fn probe(bus: &Path, profile: &EneDramProfile) -> Result<Vec<EneDramDevice>> {
@@ -73,11 +94,138 @@ pub fn discover_bus(profile: &EneDramProfile) -> Result<PathBuf> {
             continue;
         }
         let bus = Path::new("/dev").join(entry.file_name());
+        remap_dram_devices(&bus, profile)?;
         if !probe(&bus, profile)?.is_empty() {
             return Ok(bus);
         }
     }
     bail!("no supported ENE DRAM controllers found on a configured SMBus adapter")
+}
+
+/// ENE DRAM controllers can boot behind a mapper at 0x77 instead of having
+/// individual addresses. Assign each configured slot its stable address before
+/// probing. This follows OpenRGB's ENE SMBus DRAM discovery sequence.
+fn remap_dram_devices(bus: &Path, profile: &EneDramProfile) -> Result<()> {
+    let file = OpenOptions::new().read(true).write(true).open(bus)?;
+    let transport = SmbusTransport {
+        fd: file.as_raw_fd(),
+    };
+    if transport.read_address_byte(DRAM_MAPPER_ADDRESS).is_err() {
+        return Ok(());
+    }
+    for (slot, address) in mapper_assignments(profile.addresses, |address| {
+        transport.read_address_byte(address).is_ok()
+    }) {
+        transport.write_register(DRAM_MAPPER_ADDRESS, DRAM_MAPPER_SLOT_REGISTER, slot as u8)?;
+        transport.write_register(
+            DRAM_MAPPER_ADDRESS,
+            DRAM_MAPPER_ADDRESS_REGISTER,
+            (address << 1) as u8,
+        )?;
+    }
+    Ok(())
+}
+
+fn mapper_assignments(
+    addresses: &[u16],
+    mut address_is_mapped: impl FnMut(u16) -> bool,
+) -> Vec<(usize, u16)> {
+    addresses
+        .iter()
+        .enumerate()
+        .filter_map(|(slot, &address)| (!address_is_mapped(address)).then_some((slot, address)))
+        .collect()
+}
+
+/// Read, but never write, all configured controller identity fields. This is
+/// intended for diagnosing a controller that no longer matches its profile.
+pub fn diagnose(profile: &EneDramProfile) -> Result<Vec<BusDiagnostic>> {
+    let class = Path::new("/sys/class/i2c-dev");
+    let mut buses = Vec::new();
+    for entry in fs::read_dir(class).context("read /sys/class/i2c-dev")? {
+        let entry = entry?;
+        let adapter_name = fs::read_to_string(entry.path().join("name")).unwrap_or_default();
+        if !profile
+            .adapter_name_patterns
+            .iter()
+            .any(|pattern| adapter_name.contains(pattern))
+        {
+            continue;
+        }
+        let bus = Path::new("/dev").join(entry.file_name());
+        let file = match OpenOptions::new().read(true).write(true).open(&bus) {
+            Ok(file) => file,
+            Err(error) => {
+                buses.push(BusDiagnostic {
+                    bus,
+                    adapter_name: adapter_name.trim_end().to_owned(),
+                    open_error: Some(format!("{error:#}")),
+                    addresses: Vec::new(),
+                });
+                continue;
+            }
+        };
+        let transport = SmbusTransport {
+            fd: file.as_raw_fd(),
+        };
+        let addresses = profile
+            .addresses
+            .iter()
+            .map(|&address| diagnose_address(&transport, address, profile))
+            .collect();
+        buses.push(BusDiagnostic {
+            bus,
+            adapter_name: adapter_name.trim_end().to_owned(),
+            open_error: None,
+            addresses,
+        });
+    }
+    Ok(buses)
+}
+
+fn diagnose_address(
+    transport: &SmbusTransport,
+    address: u16,
+    profile: &EneDramProfile,
+) -> AddressDiagnostic {
+    let name = match read_bytes(transport, address, DEVICE_NAME_REGISTER, 16) {
+        Ok(name) => String::from_utf8_lossy(&name)
+            .trim_end_matches('\0')
+            .to_owned(),
+        Err(error) => {
+            return AddressDiagnostic {
+                address,
+                version: None,
+                led_count: None,
+                error: Some(format!("read device name: {error:#}")),
+                supported: false,
+            };
+        }
+    };
+    let config = match read_bytes(transport, address, CONFIG_TABLE_REGISTER, 64) {
+        Ok(config) => config,
+        Err(error) => {
+            return AddressDiagnostic {
+                address,
+                version: Some(name),
+                led_count: None,
+                error: Some(format!("read configuration table: {error:#}")),
+                supported: false,
+            };
+        }
+    };
+    let led_count = config[CONFIG_LED_COUNT];
+    let supported = profile
+        .controllers
+        .iter()
+        .any(|controller| controller.version == name && controller.led_count == led_count);
+    AddressDiagnostic {
+        address,
+        version: Some(name),
+        led_count: Some(led_count),
+        error: None,
+        supported,
+    }
 }
 
 fn set_color(bus: &Path, profile: &EneDramProfile, address: u16, rgb: [u8; 3]) -> Result<()> {
@@ -218,6 +366,13 @@ struct SmbusTransport {
 }
 
 impl SmbusTransport {
+    fn read_address_byte(&self, address: u16) -> Result<u8> {
+        self.set_address(address)?;
+        let mut data = SmbusData { byte: 0 };
+        self.access_ptr(I2C_SMBUS_READ, 0, I2C_SMBUS_BYTE, &mut data)?;
+        // SAFETY: `access_ptr` initialized the byte field for an SMBus byte read.
+        Ok(unsafe { data.byte })
+    }
     fn read_register(&self, address: u16, register: u16) -> Result<u8> {
         self.set_address(address)?;
         self.write_word(0x00, register.swap_bytes())?;
@@ -340,6 +495,7 @@ const I2C_SLAVE: libc::c_ulong = 0x0703;
 const I2C_SMBUS: libc::c_ulong = 0x0720;
 const I2C_SMBUS_READ: u8 = 1;
 const I2C_SMBUS_WRITE: u8 = 0;
+const I2C_SMBUS_BYTE: u32 = 1;
 const I2C_SMBUS_BYTE_DATA: u32 = 2;
 const I2C_SMBUS_WORD_DATA: u32 = 3;
 const I2C_SMBUS_BLOCK_DATA: u32 = 5;
@@ -355,6 +511,19 @@ mod tests {
     #[test]
     fn known_controller_id_is_exact() {
         assert_eq!(DEFAULT_HARDWARE.ene_dram.controllers[0].version.len(), 15);
+    }
+
+    #[test]
+    fn mapper_assigns_each_unmapped_dimm_its_configured_address() {
+        let addresses = DEFAULT_HARDWARE.ene_dram.addresses;
+        assert_eq!(
+            mapper_assignments(addresses, |_| false),
+            vec![(0, 0x70), (1, 0x71), (2, 0x72), (3, 0x73)]
+        );
+        assert_eq!(
+            mapper_assignments(addresses, |address| address == 0x71),
+            vec![(0, 0x70), (2, 0x72), (3, 0x73)]
+        );
     }
     #[test]
     fn direct_color_bytes_decode_from_rbg() {

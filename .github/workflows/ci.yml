@@ -25,3 +25,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - run: cargo test --all-targets
+
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: cargo check --release

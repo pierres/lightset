@@ -38,6 +38,10 @@ fn probe() -> Result<()> {
             continue;
         }
         for address in bus.addresses {
+            if !address.present && address.error.is_none() {
+                println!("  0x{:02x}: absent", address.address);
+                continue;
+            }
             match (address.version, address.led_count, address.error) {
                 (_, _, Some(error)) => println!("  0x{:02x}: FAILED: {error}", address.address),
                 (Some(version), Some(led_count), None) => println!(

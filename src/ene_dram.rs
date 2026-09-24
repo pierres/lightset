@@ -73,6 +73,7 @@ pub struct BusDiagnostic {
 #[derive(Debug)]
 pub struct AddressDiagnostic {
     pub address: u16,
+    pub present: bool,
     pub version: Option<String>,
     pub led_count: Option<u8>,
     pub error: Option<String>,
@@ -274,10 +275,33 @@ pub fn diagnose(profile: &EneDramProfile) -> Result<Vec<BusDiagnostic>> {
 
 #[cfg(debug_assertions)]
 fn diagnose_address(
-    transport: &SmbusTransport,
+    transport: &impl EneTransport,
     address: u16,
     profile: &EneDramProfile,
 ) -> AddressDiagnostic {
+    match address_responds(transport, address) {
+        Ok(true) => {}
+        Ok(false) => {
+            return AddressDiagnostic {
+                address,
+                present: false,
+                version: None,
+                led_count: None,
+                error: None,
+                supported: false,
+            };
+        }
+        Err(error) => {
+            return AddressDiagnostic {
+                address,
+                present: false,
+                version: None,
+                led_count: None,
+                error: Some(format!("check address: {error:#}")),
+                supported: false,
+            };
+        }
+    }
     let name = match read_bytes(transport, address, DEVICE_NAME_REGISTER, 16) {
         Ok(name) => String::from_utf8_lossy(&name)
             .trim_end_matches('\0')
@@ -285,6 +309,7 @@ fn diagnose_address(
         Err(error) => {
             return AddressDiagnostic {
                 address,
+                present: true,
                 version: None,
                 led_count: None,
                 error: Some(format!("read device name: {error:#}")),
@@ -297,6 +322,7 @@ fn diagnose_address(
         Err(error) => {
             return AddressDiagnostic {
                 address,
+                present: true,
                 version: Some(name),
                 led_count: None,
                 error: Some(format!("read configuration table: {error:#}")),
@@ -311,6 +337,7 @@ fn diagnose_address(
         .any(|controller| controller.version == name && controller.led_count == led_count);
     AddressDiagnostic {
         address,
+        present: true,
         version: Some(name),
         led_count: Some(led_count),
         error: None,
@@ -678,6 +705,20 @@ mod tests {
         assert_eq!(report.devices[0].address, 0x70);
         assert_eq!(report.failures.len(), 1);
         assert_eq!(report.failures[0].0, 0x71);
+    }
+    #[test]
+    fn diagnostics_distinguish_absent_addresses_from_failures() {
+        let transport = FakeTransport {
+            bad_identity: Some(0x71),
+            ..FakeTransport::new(vec![0x70, 0x71])
+        };
+        let profile = &DEFAULT_HARDWARE.ene_dram;
+        let known = diagnose_address(&transport, 0x70, profile);
+        assert!(known.present && known.supported);
+        let broken = diagnose_address(&transport, 0x71, profile);
+        assert!(broken.present && broken.error.is_some());
+        let empty = diagnose_address(&transport, 0x72, profile);
+        assert!(!empty.present && empty.error.is_none());
     }
     #[test]
     fn a_failed_dimm_does_not_stop_other_writes() {

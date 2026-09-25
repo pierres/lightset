@@ -31,3 +31,4 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - run: cargo check --release
+      - run: cargo test --release --all-targets --locked

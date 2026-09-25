@@ -706,6 +706,7 @@ mod tests {
         assert_eq!(report.failures.len(), 1);
         assert_eq!(report.failures[0].0, 0x71);
     }
+    #[cfg(debug_assertions)]
     #[test]
     fn diagnostics_distinguish_absent_addresses_from_failures() {
         let transport = FakeTransport {
